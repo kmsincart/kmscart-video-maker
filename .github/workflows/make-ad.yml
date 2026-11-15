@@ -25,36 +25,41 @@ jobs:
   build-video:
     runs-on: ubuntu-latest
     steps:
+      - name: Install FFmpeg & Fonts
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg fonts-dejavu-core
+
       - name: Set variables
-        id: vars
         run: |
           IMG="${{ github.event.inputs.image_url || github.event.client_payload.image_url }}"
-          TITLE="${{ github.event.inputs.title || github.event.client_payload.title }}"
+          RAW_TITLE="${{ github.event.inputs.title || github.event.client_payload.title }}"
+          SAFE_TITLE=$(echo "${RAW_TITLE:0:38}" | tr -d "'\":")
           CAPTION="${{ github.event.inputs.caption || github.event.client_payload.caption }}"
           HOOK="${{ github.event.inputs.webhook_url || github.event.client_payload.webhook_url }}"
           echo "IMG=$IMG" >> $GITHUB_ENV
-          echo "TITLE=${TITLE:0:42}" >> $GITHUB_ENV
+          echo "TITLE=$SAFE_TITLE" >> $GITHUB_ENV
           echo "CAPTION=$CAPTION" >> $GITHUB_ENV
           echo "HOOK=$HOOK" >> $GITHUB_ENV
 
       - name: Create 9:16 Reels/Shorts Video with FFmpeg
         run: |
           curl -L -s "$IMG" -o product.jpg
+          FONT="/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
           ffmpeg -y -loop 1 -i product.jpg -f lavfi -i anullsrc=r=44100:cl=stereo \
           -filter_complex "\
           [0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=25:5,eq=brightness=-0.25[bg]; \
-          [0:v]scale=900:900:force_original_aspect_ratio=decrease,pad=900:900:(ow-iw)/2:(oh-ih)/2:color=white@0.0,zoompan=z='min(zoom+0.0012,1.15)':d=360:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=900x900[fg]; \
+          [0:v]scale=900:900:force_original_aspect_ratio=decrease,pad=900:900:(ow-iw)/2:(oh-ih)/2:color=black@0.0,zoompan=z='min(zoom+0.0012,1.15)':d=360:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=900x900[fg]; \
           [bg][fg]overlay=(W-w)/2:(H-h)/2-60,\
           drawbox=x=0:y=0:w=1080:h=160:color=black@0.75:t=fill,\
-          drawtext=text='KMS CART  |  SMART DEALS':fontcolor=white:fontsize=46:x=(w-text_w)/2:y=58,\
+          drawtext=fontfile=$FONT:text='KMS CART  |  SMART DEALS':fontcolor=white:fontsize=46:x=(w-text_w)/2:y=58,\
           drawbox=x=0:y=1520:w=1080:h=400:color=black@0.8:t=fill,\
-          drawtext=text='$TITLE':fontcolor=yellow:fontsize=42:x=(w-text_w)/2:y=1575,\
-          drawtext=text='FREE DELIVERY  |  COD AVAILABLE':fontcolor=white:fontsize=36:x=(w-text_w)/2:y=1660,\
-          drawtext=text='Shop Now at www.kmscart.com':fontcolor=#38bdf8:fontsize=40:x=(w-text_w)/2:y=1745[v]" \
+          drawtext=fontfile=$FONT:text='$TITLE':fontcolor=yellow:fontsize=42:x=(w-text_w)/2:y=1575,\
+          drawtext=fontfile=$FONT:text='FREE DELIVERY  |  COD AVAILABLE':fontcolor=white:fontsize=34:x=(w-text_w)/2:y=1660,\
+          drawtext=fontfile=$FONT:text='Shop Now at www.kmscart.com':fontcolor=#38bdf8:fontsize=38:x=(w-text_w)/2:y=1745[v]" \
           -map "[v]" -map 1:a -t 12 -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest ad_video.mp4
 
       - name: Upload Video to Release
-        id: release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ad-${{ github.run_id }}
