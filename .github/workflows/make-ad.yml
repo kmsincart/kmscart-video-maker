@@ -3,18 +3,10 @@ name: KMS CART Video Ad Maker
 on:
   workflow_dispatch:
     inputs:
-      image_url:
-        description: 'Product Image URL'
-        required: true
-      title:
-        description: 'Product Title'
-        required: true
-      caption:
-        description: 'Ad Caption'
-        required: false
-      webhook_url:
-        description: 'Make.com Webhook URL'
-        required: false
+      image_url: { required: true }
+      title: { required: true }
+      caption: { required: false }
+      webhook_url: { required: false }
   repository_dispatch:
     types: [make_ad_video]
 
@@ -25,51 +17,64 @@ jobs:
   build-video:
     runs-on: ubuntu-latest
     steps:
-      - name: Install Open-Source Video, Audio & Font Tools
+      - name: Install Tools
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg fonts-noto-core fonts-noto-color-emoji
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg fonts-noto-core fonts-noto-color-emoji
           pip install -q edge-tts
 
-      - name: Set variables
+      - name: Set Variables
         run: |
-          IMG="${{ github.event.inputs.image_url || github.event.client_payload.image_url }}"
-          RAW_TITLE="${{ github.event.inputs.title || github.event.client_payload.title }}"
-          SAFE_TITLE=$(echo "${RAW_TITLE:0:45}" | tr -d "'\"")
-          CAPTION="${{ github.event.inputs.caption || github.event.client_payload.caption }}"
-          HOOK="${{ github.event.inputs.webhook_url || github.event.client_payload.webhook_url }}"
-          echo "IMG=$IMG" >> $GITHUB_ENV
-          echo "TITLE=$SAFE_TITLE" >> $GITHUB_ENV
-          echo "CAPTION=$CAPTION" >> $GITHUB_ENV
-          echo "HOOK=$HOOK" >> $GITHUB_ENV
+          echo "IMG=${{ github.event.inputs.image_url || github.event.client_payload.image_url }}" >> $GITHUB_ENV
+          RAW_T="${{ github.event.inputs.title || github.event.client_payload.title }}"
+          echo "TITLE=$(echo "${RAW_T:0:45}" | tr -d "'\"")" >> $GITHUB_ENV
+          echo "CAPTION=${{ github.event.inputs.caption || github.event.client_payload.caption }}" >> $GITHUB_ENV
+          echo "HOOK=${{ github.event.inputs.webhook_url || github.event.client_payload.webhook_url }}" >> $GITHUB_ENV
 
-      - name: Generate AI Voiceover, Background Music & Styled Overlay
+      - name: Build Voice, Music, Design & Video
         run: |
           curl -L -s "$IMG" -o product.jpg
-          cat << 'EOF' > build_assets.py
-          import os, re, html, asyncio, wave, math, struct
-          import edge_tts
-
+          cat << 'EOF' > build.py
+          import os, re, html, asyncio, wave, math, struct, edge_tts
           title = os.environ.get("TITLE", "Smart Deal").strip()
           caption = os.environ.get("CAPTION", "").strip()
           run_num = int(os.environ.get("GITHUB_RUN_NUMBER", "1"))
-
-          clean_cap = re.sub(r'[*#_`]', '', caption)
-          lines = [l.strip() for l in re.split(r'[.!?\n]+', clean_cap) if len(l.strip()) > 6]
-          hook_text = lines[0][:85] if lines else "Trending Smart Find for Your Home!"
-
-          has_ml = bool(re.search(r'[\u0D00-\u0D7F]', hook_text))
-          has_hi = bool(re.search(r'[\u0900-\u097F]', hook_text))
-
-          if has_ml:
-              voice = "ml-IN-SobhanaNeural"
-              spoken = f"{hook_text}. ഇപ്പോൾ തന്നെ ഓർഡർ ചെയ്യൂ. ക്യാഷ് ഓൺ ഡെലിവറിയും ഫ്രീ ഡെലിവറിയും ലഭ്യമാണ്. kmscart dot com."
-          elif has_hi:
-              voice = "hi-IN-SwaraNeural"
-              spoken = f"{hook_text}. {title}. अभी ऑर्डर करें, कैश ऑन डिलीवरी और फ्री डिलीवरी उपलब्ध है. kmscart dot com."
+          lines = [l.strip() for l in re.split(r'[.!?\n]+', re.sub(r'[*#_`]', '', caption)) if len(l.strip()) > 6]
+          hook = lines[0][:85] if lines else "Trending Smart Find for Your Home!"
+          if re.search(r'[\u0D00-\u0D7F]', hook):
+              v, s = "ml-IN-SobhanaNeural", f"{hook}. ഇപ്പോൾ തന്നെ ഓർഡർ ചെയ്യൂ. ക്യാഷ് ഓൺ ഡെലിവറിയും ഫ്രീ ഡെലിവറിയും ലഭ്യമാണ്. kmscart dot com."
+          elif re.search(r'[\u0900-\u097F]', hook):
+              v, s = "hi-IN-SwaraNeural", f"{hook}. {title}. अभी ऑर्डर करें, कैश ऑन डिलीवरी उपलब्ध है. kmscart dot com."
           else:
-              voice = "en-IN-NeerjaExpressiveNeural"
-              spoken = f"{hook_text}. {title}. Cash on delivery and free Pan-India delivery available at kmscart dot com!"
+              v, s = "en-IN-NeerjaExpressiveNeural", f"{hook}. {title}. Cash on delivery and free delivery at kmscart dot com!"
+          try: asyncio.run(edge_tts.Communicate(s, v, rate="+5%").save("voice.mp3"))
+          except Exception as e: print("TTS:", e)
+          sr, dur = 44100, 20
+          chords = [(261.63,329.63,392.0),(220.0,261.63,329.63),(174.61,220.0,261.63),(196.0,246.94,293.66)]
+          with wave.open("bgm.wav", "w") as wf:
+              wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(sr)
+              wf.writeframes(b"".join(struct.pack("<h", int(max(-32767, min(32767, (sum(math.sin(2*math.pi*f*(i/sr)) for f in chords[int((i/sr)/2.5)%4])/3)*math.exp(-3.5*((i/sr)%0.5))*9000)))) for i in range(sr*dur)))
+          themes = [("#ff512f","#dd2476","#fde047","#111827","🔥 VIRAL TRENDING DEAL"),("#0ea5e9","#2563eb","#facc15","#0f172a","✨ SMART FAMILY PICK"),("#7c3aed","#db2777","#bef264","#111827","⭐ BESTSELLER IN INDIA"),("#059669","#0d9488","#fde047","#064e3b","🎁 SPECIAL OFFER TODAY"),("#ea580c","#dc2626","#fef08a","#7c2d12","⚡ LIMITED STOCK ALERT")]
+          b1,b2,pl,pt,tg = themes[run_num % 5]
+          open("overlay.html","w",encoding="utf-8").write(f"""<!DOCTYPE html><html><head><meta charset="utf-8"><style>*{{box-sizing:border-box;margin:0;padding:0}}body{{width:1080px;height:1920px;background:transparent;font-family:'Noto Sans Malayalam','Noto Sans','Noto Color Emoji',sans-serif;display:flex;flex-direction:column;justify-content:space-between;padding:60px 52px}}.tw{{display:flex;flex-direction:column;align-items:center;gap:22px}}.bp{{background:{pl};color:{pt};font-size:30px;font-weight:900;padding:14px 36px;border-radius:999px;box-shadow:0 10px 30px rgba(0,0,0,.35)}}.hc{{width:100%;background:linear-gradient(135deg,{b1},{b2});color:#fff;padding:36px 40px;border-radius:32px;text-align:center;font-size:46px;font-weight:800;line-height:1.35;border:4px solid rgba(255,255,255,.35)}}.bc{{width:100%;background:rgba(15,23,42,.88);color:#fff;padding:40px 42px;border-radius:36px;text-align:center;border:3px solid rgba(255,255,255,.2);display:flex;flex-direction:column;gap:22px;align-items:center}}.ti{{font-size:44px;font-weight:800;color:#fde047}}.bs{{display:flex;gap:18px;flex-wrap:wrap;justify-content:center}}.bg{{background:rgba(255,255,255,.14);padding:12px 24px;border-radius:16px;font-size:28px;font-weight:700}}.ct{{background:linear-gradient(90deg,{b1},{b2});color:#fff;font-size:36px;font-weight:900;padding:18px 48px;border-radius:999px}}</style></head><body><div class="tw"><div class="bp">{tg}</div><div class="hc">{html.escape(hook)}</div></div><div class="bc"><div class="ti">{html.escape(title)}</div><div class="bs"><div class="bg">💵 Cash on Delivery</div><div class="bg">🚚 Free Pan-India Delivery</div></div><div class="ct">🛒 Order Now: www.kmscart.com</div></div></body></html>""")
+          EOF
+          python3 build.py
+          google-chrome --headless --no-sandbox --disable-gpu --screenshot=overlay.png --window-size=1080,1920 --default-background-color=00000000 overlay.html
+          if [ -f voice.mp3 ]; then
+            VDUR=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 voice.mp3 | awk '{d=$1+1.5; if(d<10) d=10; if(d>18) d=18; printf "%.1f", d}')
+            ffmpeg -y -loop 1 -i product.jpg -i overlay.png -i voice.mp3 -i bgm.wav -filter_complex "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=30:5,eq=brightness=-0.2[bg];[0:v]scale=920:920:force_original_aspect_ratio=decrease,pad=920:920:(ow-iw)/2:(oh-ih)/2:color=black@0.0,zoompan=z='min(zoom+0.0014,1.18)':d=450:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=920x920[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2-20[base];[base][1:v]overlay=0:0[v];[2:a]apad,volume=1.0[vo];[3:a]volume=0.16[mu];[vo][mu]amix=inputs=2:duration=first[a]" -map "[v]" -map "[a]" -t "$VDUR" -c:v libx264 -pix_fmt yuv420p -c:a aac -b:a 128k ad_video.mp4
+          else
+            ffmpeg -y -loop 1 -i product.jpg -i overlay.png -i bgm.wav -filter_complex "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=30:5,eq=brightness=-0.2[bg];[0:v]scale=920:920:force_original_aspect_ratio=decrease,pad=920:920:(ow-iw)/2:(oh-ih)/2:color=black@0.0,zoompan=z='min(zoom+0.0014,1.18)':d=360:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=920x920[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2-20[base];[base][1:v]overlay=0:0[v]" -map "[v]" -map 2:a -t 12 -c:v libx264 -pix_fmt yuv420p -c:a aac -b:a 128k ad_video.mp4
+          fi
 
-          async def make_tts():
-              communicate = edge_tts.Communicate(spoken, voice, rate="+5%")
+      - name: Upload Video to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ad-${{ github.run_id }}
+          files: ad_video.mp4
+
+      - name: Notify Make.com Webhook
+        if: env.HOOK != ''
+        run: |
+          VIDEO_URL="https://github.com/${{ github.repository }}/releases/download/ad-${{ github.run_id }}/ad_video.mp4"
+          jq -n --arg v "$VIDEO_URL" --arg t "$TITLE" --arg c "$CAPTION" '{video_url:$v, title:$t, caption:$c}' > payload.json
+          curl -s -X POST -H "Content-Type: application/json" -d @payload.json "$HOOK"
