@@ -17,10 +17,10 @@ jobs:
   build-video:
     runs-on: ubuntu-latest
     steps:
-      - name: Install Open-Source Video, Lip-Sync & Font Tools
+      - name: Install Open-Source Video, Studio Music, Lip-Sync & Font Tools
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg fonts-noto-core fonts-noto-color-emoji unzip
-          pip install -q edge-tts pillow
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg fonts-noto-core fonts-noto-color-emoji unzip fluidsynth fluid-soundfont-gm
+          pip install -q edge-tts pillow midiutil
           curl -L -s "https://github.com/DanielSWolf/rhubarb-lip-sync/releases/download/v1.14.0/Rhubarb-Lip-Sync-1.14.0-Linux.zip" -o rh.zip
           unzip -q rh.zip -d rh_dir && find rh_dir -name rhubarb -type f -exec mv {} ./rhubarb \; && chmod +x ./rhubarb
 
@@ -32,27 +32,46 @@ jobs:
           echo "CAPTION=${{ github.event.inputs.caption || github.event.client_payload.caption }}" >> $GITHUB_ENV
           echo "HOOK=${{ github.event.inputs.webhook_url || github.event.client_payload.webhook_url }}" >> $GITHUB_ENV
 
-      - name: Build Malayalam Voice, Rotating Styles & Video
+      - name: Build Natural Malayalam Voice, Studio Music & Rotating Video
+        env:
+          TTS_KEY: ${{ secrets.GOOGLE_TTS_KEY }}
         run: |
           curl -L -s "$IMG" -o product.jpg
           cat << 'EOF' > build.py
-          import os, re, html, json, asyncio, wave, math, struct, subprocess, edge_tts
+          import os, re, html, json, base64, asyncio, math, subprocess, urllib.request, edge_tts
           from PIL import Image, ImageDraw
+          from midiutil import MIDIFile
 
           title = os.environ.get("TITLE", "Smart Deal").strip()
           caption = os.environ.get("CAPTION", "").strip()
+          tts_key = os.environ.get("TTS_KEY", "").strip()
           run_num = int(os.environ.get("GITHUB_RUN_NUMBER", "1"))
-          style = run_num % 3  # 0: Cartoon Mascot, 1: Bold Flash Sale, 2: Luxury Studio
+          style = run_num % 3
           clean = re.sub(r'[*#_`]', '', caption)
           parts = [re.sub(r'^(Malayalam|Hindi|English)\s*[:\-–]\s*', '', l.strip(), flags=re.I) for l in re.split(r'[\n.!?]+', clean)]
           ml_lines = [l for l in parts if len(l) > 6 and re.search(r'[\u0D00-\u0D7F]', l)]
           hi_lines = [l for l in parts if len(l) > 6 and re.search(r'[\u0900-\u097F]', l)]
           ml_hook = ml_lines[0][:130] if ml_lines else f"{title}, മികച്ച ക്വാളിറ്റിയും വിലക്കുറവും!"
-          hi_sub = hi_lines[0][:95] if hi_lines else "🔥 भारत में ट्रेंडिंग डील — अभी ऑर्डर करें!"
-          voice = "ml-IN-SobhanaNeural" if run_num % 2 == 0 else "ml-IN-MidhunNeural"
+          hi_sub = hi_lines[0][:85] if hi_lines else "भारत में ट्रेंडिंग डील — अभी ऑर्डर करें!"
           spoken = f"{ml_hook}. ഇപ്പോൾ തന്നെ kmscart dot com-ൽ ഓർഡർ ചെയ്യൂ! ക്യാഷ് ഓൺ ഡെലിവറിയും ഫ്രീ ഡെലിവറിയും ലഭ്യമാണ്."
-          try: asyncio.run(edge_tts.Communicate(spoken, voice, rate="+4%").save("voice.mp3"))
-          except Exception as e: print("TTS:", e)
+
+          tts_ok = False
+          if tts_key:
+              for gvoice in (["ml-IN-Chirp3-HD-Achernar", "ml-IN-Wavenet-C"] if run_num % 2 == 0 else ["ml-IN-Wavenet-D", "ml-IN-Chirp3-HD-Achernar"]):
+                  try:
+                      req = urllib.request.Request(
+                          f"https://texttospeech.googleapis.com/v1/text:synthesize?key={tts_key}",
+                          data=json.dumps({"input":{"text":spoken},"voice":{"languageCode":"ml-IN","name":gvoice},"audioConfig":{"audioEncoding":"MP3","speakingRate":1.02}}).encode(),
+                          headers={"Content-Type":"application/json"}
+                      )
+                      res = json.loads(urllib.request.urlopen(req, timeout=20).read().decode())
+                      if "audioContent" in res:
+                          open("voice.mp3","wb").write(base64.b64decode(res["audioContent"]))
+                          tts_ok = True; print("Used Google TTS:", gvoice); break
+                  except Exception as e: print("Google TTS fallback:", gvoice, e)
+          if not tts_ok:
+              try: asyncio.run(edge_tts.Communicate(spoken, "ml-IN-SobhanaNeural", rate="+4%").save("voice.mp3"))
+              except Exception as e: print("Edge TTS:", e)
 
           dur = 12.0
           if os.path.exists("voice.mp3"):
@@ -60,14 +79,33 @@ jobs:
               out = subprocess.check_output(["ffprobe","-v","error","-show_entries","format=duration","-of","default=noprint_wrappers=1:nokey=1","voice.mp3"]).decode().strip()
               dur = max(10.0, min(18.0, float(out) + 1.2))
 
-          sr = 44100
-          with wave.open("bgm.wav", "w") as wf:
-              wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(sr)
-              wf.writeframes(b"".join(struct.pack("<h", int(max(-32767, min(32767, math.sin(2*math.pi*196.0*(i/sr))*1100 + math.sin(2*math.pi*293.66*(i/sr))*700)))) for i in range(sr*int(dur+2))))
+          midi = MIDIFile(2)
+          midi.addTempo(0, 0, 96); midi.addProgramChange(0, 0, 0, 12)
+          midi.addTempo(1, 0, 96); midi.addProgramChange(1, 1, 0, 89)
+          chords = [[60,64,67,71],[57,60,64,67],[53,57,60,64],[55,59,62,67]]
+          for bar in range(10):
+              c = chords[bar % 4]
+              for n in c: midi.addNote(1, 1, n, bar*4, 4, 55)
+              for step, n in enumerate(c * 2): midi.addNote(0, 0, n+12, bar*4 + step*0.5, 0.45, 85)
+          with open("bgm.mid", "wb") as f: midi.writeFile(f)
+
+          words = hi_sub.split()
+          per_w = max(25, int(((dur - 1.5) * 100) / max(1, len(words))))
+          k_line = "".join(f"{{\\k{per_w}}}{w} " for w in words)
+          ass = f"""[Script Info]
+          PlayResX: 1080
+          PlayResY: 1920
+          [V4+ Styles]
+          Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+          Style: Default,Noto Sans Devanagari,52,&H0000E5FF,&H00FFFFFF,&H00000000,&HB0000000,-1,0,0,0,100,100,0,0,3,4,0,2,60,60,420,1
+          [Events]
+          Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+          Dialogue: 0,0:00:00.20,0:00:{dur-0.3:05.2f},Default,,0,0,0,,{k_line}
+          """
+          open("subs.ass", "w", encoding="utf-8").write(ass)
 
           os.makedirs("mframes", exist_ok=True)
-          fps = 15
-          n_frames = int(dur * fps)
+          fps, n_frames = 15, int(dur * 15)
           if style == 0:
               cues = []
               if os.path.exists("voice.wav") and os.path.exists("./rhubarb"):
@@ -81,41 +119,43 @@ jobs:
               for idx in range(n_frames):
                   t_sec = idx / fps
                   shape = next((c["value"] for c in cues if c["start"] <= t_sec <= c["end"]), "X") if cues else ("D" if (idx//2)%2==0 else "A")
-                  im = Image.new("RGBA", (300, 300), (0,0,0,0)); d = ImageDraw.Draw(im)
+                  im = Image.new("RGBA", (280, 280), (0,0,0,0)); d = ImageDraw.Draw(im)
                   bob = int(5 * math.sin(t_sec * 4))
                   if pet == 0:
-                      d.ellipse([15,70+bob,95,190+bob],fill=c_ear,outline="#1e293b",width=4); d.ellipse([205,70+bob,285,190+bob],fill=c_ear,outline="#1e293b",width=4)
+                      d.ellipse([15,65+bob,90,180+bob],fill=c_ear,outline="#1e293b",width=4); d.ellipse([190,65+bob,265,180+bob],fill=c_ear,outline="#1e293b",width=4)
                   elif pet == 1:
-                      d.polygon([(55,95+bob),(45,25+bob),(115,65+bob)],fill=c_ear,outline="#1e293b"); d.polygon([(245,95+bob),(255,25+bob),(185,65+bob)],fill=c_ear,outline="#1e293b")
+                      d.polygon([(50,90+bob),(40,22+bob),(105,60+bob)],fill=c_ear,outline="#1e293b"); d.polygon([(230,90+bob),(240,22+bob),(175,60+bob)],fill=c_ear,outline="#1e293b")
                   else:
-                      d.ellipse([45,35+bob,110,100+bob],fill=c_ear,outline="#1e293b",width=4); d.ellipse([190,35+bob,255,100+bob],fill=c_ear,outline="#1e293b",width=4)
-                  d.ellipse([55,55+bob,245,245+bob],fill=c_main,outline="#1e293b",width=5)
-                  if pet == 2: d.ellipse([85,110+bob,130,155+bob],fill="#1e293b"); d.ellipse([170,110+bob,215,155+bob],fill="#1e293b")
+                      d.ellipse([40,30+bob,100,90+bob],fill=c_ear,outline="#1e293b",width=4); d.ellipse([180,30+bob,240,90+bob],fill=c_ear,outline="#1e293b",width=4)
+                  d.ellipse([50,50+bob,230,230+bob],fill=c_main,outline="#1e293b",width=5)
+                  if pet == 2: d.ellipse([78,105+bob,120,145+bob],fill="#1e293b"); d.ellipse([160,105+bob,202,145+bob],fill="#1e293b")
                   if idx % 45 in (0, 1):
-                      d.line([100,130+bob,122,130+bob],fill="#0f172a",width=5); d.line([178,130+bob,200,130+bob],fill="#0f172a",width=5)
+                      d.line([92,122+bob,114,122+bob],fill="#0f172a",width=5); d.line([166,122+bob,188,122+bob],fill="#0f172a",width=5)
                   else:
-                      d.ellipse([98,118+bob,124,144+bob],fill="#0f172a"); d.ellipse([176,118+bob,202,144+bob],fill="#0f172a")
-                      d.ellipse([104,122+bob,112,130+bob],fill="#fff"); d.ellipse([182,122+bob,190,130+bob],fill="#fff")
-                  d.ellipse([115,155+bob,185,215+bob],fill=c_acc); d.ellipse([140,155+bob,160,170+bob],fill="#1e293b")
-                  if shape in ("A","X"): d.arc([130,175+bob,170,198+bob],10,170,fill="#1e293b",width=4)
-                  elif shape in ("B","C","E","F"): d.ellipse([134,178+bob,166,198+bob],fill="#991b1b",outline="#1e293b",width=3)
-                  else: d.ellipse([130,174+bob,170,210+bob],fill="#991b1b",outline="#1e293b",width=3)
+                      d.ellipse([90,110+bob,116,136+bob],fill="#0f172a"); d.ellipse([164,110+bob,190,136+bob],fill="#0f172a")
+                      d.ellipse([96,114+bob,104,122+bob],fill="#fff"); d.ellipse([170,114+bob,178,122+bob],fill="#fff")
+                  d.ellipse([108,145+bob,172,202+bob],fill=c_acc); d.ellipse([130,145+bob,150,160+bob],fill="#1e293b")
+                  if shape in ("A","X"): d.arc([120,165+bob,160,188+bob],10,170,fill="#1e293b",width=4)
+                  elif shape in ("B","C","E","F"): d.ellipse([124,168+bob,156,188+bob],fill="#991b1b",outline="#1e293b",width=3)
+                  else: d.ellipse([120,164+bob,160,198+bob],fill="#991b1b",outline="#1e293b",width=3)
                   im.save(f"mframes/f_{idx:04d}.png")
           else:
               Image.new("RGBA", (10, 10), (0,0,0,0)).save("mframes/f_0000.png")
 
           themes = [("#0f172a","#1e293b","#f59e0b","#111827","🔥 TRENDING DEAL"),("#991b1b","#dc2626","#fde047","#111827","⚡ FLASH OFFER TODAY"),("#111827","#1f2937","#38bdf8","#082f49","✨ PREMIUM PICK")]
           b1,b2,ac,at,tg = themes[style]
-          open("overlay.html","w",encoding="utf-8").write(f"""<!DOCTYPE html><html><head><meta charset="utf-8"><style>*{{box-sizing:border-box;margin:0;padding:0}}body{{width:1080px;height:1920px;background:transparent;font-family:'Noto Sans Devanagari','Noto Sans Malayalam','Noto Sans','Noto Color Emoji',sans-serif;display:flex;flex-direction:column;justify-content:space-between;padding:56px 48px}}.top{{display:flex;justify-content:space-between;align-items:center;background:rgba(15,23,42,.82);padding:20px 34px;border-radius:28px;border:2px solid rgba(255,255,255,.18)}}.logo{{color:#fff;font-size:34px;font-weight:900;letter-spacing:2px}}.tag{{background:{ac};color:{at};font-size:26px;font-weight:900;padding:10px 26px;border-radius:999px}}.bot{{display:flex;flex-direction:column;gap:20px;align-items:center}}.sub{{width:100%;background:rgba(0,0,0,.86);color:#fde047;padding:28px 34px;border-radius:26px;text-align:center;font-size:40px;font-weight:800;line-height:1.38;border-left:10px solid {ac};box-shadow:0 14px 35px rgba(0,0,0,.5)}}.card{{width:100%;background:linear-gradient(135deg,{b1},{b2});color:#fff;padding:34px 36px;border-radius:32px;text-align:center;border:2px solid rgba(255,255,255,.22);display:flex;flex-direction:column;gap:18px;align-items:center}}.ti{{font-size:38px;font-weight:800;color:#fff}}.bs{{display:flex;gap:16px;flex-wrap:wrap;justify-content:center}}.bg{{background:rgba(255,255,255,.14);padding:10px 22px;border-radius:14px;font-size:26px;font-weight:700}}.ct{{background:{ac};color:{at};font-size:34px;font-weight:900;padding:16px 44px;border-radius:999px}}</style></head><body><div class="top"><div class="logo">KMS CART</div><div class="tag">{tg}</div></div><div class="bot"><div class="sub">{html.escape(hi_sub)}</div><div class="card"><div class="ti">{html.escape(title)}</div><div class="bs"><div class="bg">💵 Cash on Delivery</div><div class="bg">🚚 Free Pan-India Delivery</div></div><div class="ct">🛒 Order Now: www.kmscart.com</div></div></div></body></html>""")
+          open("overlay.html","w",encoding="utf-8").write(f"""<!DOCTYPE html><html><head><meta charset="utf-8"><style>*{{box-sizing:border-box;margin:0;padding:0}}body{{width:1080px;height:1920px;background:transparent;font-family:'Noto Sans','Noto Color Emoji',sans-serif;display:flex;flex-direction:column;justify-content:space-between;padding:56px 48px}}.top{{display:flex;justify-content:space-between;align-items:center;background:rgba(15,23,42,.85);padding:20px 34px;border-radius:28px;border:2px solid rgba(255,255,255,.18)}}.logo{{color:#fff;font-size:34px;font-weight:900;letter-spacing:2px}}.tag{{background:{ac};color:{at};font-size:26px;font-weight:900;padding:10px 26px;border-radius:999px}}.card{{width:100%;background:linear-gradient(135deg,{b1},{b2});color:#fff;padding:34px 36px;border-radius:32px;text-align:center;border:2px solid rgba(255,255,255,.22);display:flex;flex-direction:column;gap:18px;align-items:center}}.ti{{font-size:38px;font-weight:800;color:#fff}}.bs{{display:flex;gap:16px;flex-wrap:wrap;justify-content:center}}.bg{{background:rgba(255,255,255,.14);padding:10px 22px;border-radius:14px;font-size:26px;font-weight:700}}.ct{{background:{ac};color:{at};font-size:34px;font-weight:900;padding:16px 44px;border-radius:999px}}</style></head><body><div class="top"><div class="logo">KMS CART</div><div class="tag">{tg}</div></div><div class="card"><div class="ti">{html.escape(title)}</div><div class="bs"><div class="bg">💵 Cash on Delivery</div><div class="bg">🚚 Free Pan-India Delivery</div></div><div class="ct">🛒 Order Now: www.kmscart.com</div></div></body></html>""")
           open("dur.txt","w").write(f"{dur:.1f}")
           EOF
           python3 build.py
           VDUR=$(cat dur.txt)
+          SF2=$(find /usr/share/sounds/sf2 -name "*.sf2" | head -n 1)
+          fluidsynth -ni "$SF2" bgm.mid -F bgm.wav -r 44100 >/dev/null 2>&1
           google-chrome --headless --no-sandbox --disable-gpu --screenshot=overlay.png --window-size=1080,1920 --default-background-color=00000000 overlay.html
           if [ -f mframes/f_0001.png ]; then
-            ffmpeg -y -loop 1 -i product.jpg -i overlay.png -framerate 15 -i mframes/f_%04d.png -i voice.mp3 -i bgm.wav -filter_complex "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=35:6,eq=brightness=-0.25[bg];[0:v]scale=900:900:force_original_aspect_ratio=decrease:flags=lanczos,pad=940:940:(ow-iw)/2:(oh-ih)/2:color=white,zoompan=z='min(zoom+0.0012,1.14)':d=540:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=940x940:fps=30[fg];[bg][fg]overlay=(W-w)/2:240[base];[base][1:v]overlay=0:0[ov];[ov][2:v]overlay=40:920:shortest=1[v];[3:a]apad,volume=1.0[vo];[4:a]volume=0.05[mu];[vo][mu]amix=inputs=2:duration=first[a]" -map "[v]" -map "[a]" -t "$VDUR" -r 30 -c:v libx264 -pix_fmt yuv420p -c:a aac -b:a 128k ad_video.mp4
+            ffmpeg -y -loop 1 -i product.jpg -i overlay.png -framerate 15 -i mframes/f_%04d.png -i voice.mp3 -i bgm.wav -filter_complex "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=35:6,eq=brightness=-0.25[bg];[0:v]scale=900:900:force_original_aspect_ratio=decrease:flags=lanczos,pad=940:940:(ow-iw)/2:(oh-ih)/2:color=white,zoompan=z='min(zoom+0.0012,1.14)':d=540:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=940x940:fps=30[fg];[bg][fg]overlay=(W-w)/2:240[base];[base][1:v]overlay=0:0[ov];[ov][2:v]overlay=40:920:shortest=1,ass=subs.ass[v];[3:a]apad,loudnorm=I=-16:TP=-1.5:LRA=11[vo];[4:a]volume=0.22[mu];[mu][vo]sidechaincompress=threshold=0.02:ratio=6:attack=20:release=250[duck];[vo][duck]amix=inputs=2:duration=first[a]" -map "[v]" -map "[a]" -t "$VDUR" -r 30 -c:v libx264 -pix_fmt yuv420p -c:a aac -b:a 128k ad_video.mp4
           else
-            ffmpeg -y -loop 1 -i product.jpg -i overlay.png -i voice.mp3 -i bgm.wav -filter_complex "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=35:6,eq=brightness=-0.25[bg];[0:v]scale=900:900:force_original_aspect_ratio=decrease:flags=lanczos,pad=940:940:(ow-iw)/2:(oh-ih)/2:color=white,zoompan=z='min(zoom+0.0012,1.14)':d=540:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=940x940:fps=30[fg];[bg][fg]overlay=(W-w)/2:240[base];[base][1:v]overlay=0:0[v];[2:a]apad,volume=1.0[vo];[3:a]volume=0.05[mu];[vo][mu]amix=inputs=2:duration=first[a]" -map "[v]" -map "[a]" -t "$VDUR" -r 30 -c:v libx264 -pix_fmt yuv420p -c:a aac -b:a 128k ad_video.mp4
+            ffmpeg -y -loop 1 -i product.jpg -i overlay.png -i voice.mp3 -i bgm.wav -filter_complex "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=35:6,eq=brightness=-0.25[bg];[0:v]scale=900:900:force_original_aspect_ratio=decrease:flags=lanczos,pad=940:940:(ow-iw)/2:(oh-ih)/2:color=white,zoompan=z='min(zoom+0.0012,1.14)':d=540:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=940x940:fps=30[fg];[bg][fg]overlay=(W-w)/2:240[base];[base][1:v]overlay=0:0,ass=subs.ass[v];[2:a]apad,loudnorm=I=-16:TP=-1.5:LRA=11[vo];[3:a]volume=0.22[mu];[mu][vo]sidechaincompress=threshold=0.02:ratio=6:attack=20:release=250[duck];[vo][duck]amix=inputs=2:duration=first[a]" -map "[v]" -map "[a]" -t "$VDUR" -r 30 -c:v libx264 -pix_fmt yuv420p -c:a aac -b:a 128k ad_video.mp4
           fi
 
       - name: Upload Video to Release
