@@ -25,16 +25,17 @@ jobs:
   build-video:
     runs-on: ubuntu-latest
     steps:
-      - name: Install FFmpeg & Fonts
+      - name: Install Open-Source Video, Audio & Font Tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg fonts-dejavu-core
+          sudo apt-get install -y -qq ffmpeg fonts-noto-core fonts-noto-color-emoji
+          pip install -q edge-tts
 
       - name: Set variables
         run: |
           IMG="${{ github.event.inputs.image_url || github.event.client_payload.image_url }}"
           RAW_TITLE="${{ github.event.inputs.title || github.event.client_payload.title }}"
-          SAFE_TITLE=$(echo "${RAW_TITLE:0:38}" | tr -d "'\":")
+          SAFE_TITLE=$(echo "${RAW_TITLE:0:45}" | tr -d "'\"")
           CAPTION="${{ github.event.inputs.caption || github.event.client_payload.caption }}"
           HOOK="${{ github.event.inputs.webhook_url || github.event.client_payload.webhook_url }}"
           echo "IMG=$IMG" >> $GITHUB_ENV
@@ -42,32 +43,33 @@ jobs:
           echo "CAPTION=$CAPTION" >> $GITHUB_ENV
           echo "HOOK=$HOOK" >> $GITHUB_ENV
 
-      - name: Create 9:16 Reels/Shorts Video with FFmpeg
+      - name: Generate AI Voiceover, Background Music & Styled Overlay
         run: |
           curl -L -s "$IMG" -o product.jpg
-          FONT="/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-          ffmpeg -y -loop 1 -i product.jpg -f lavfi -i anullsrc=r=44100:cl=stereo \
-          -filter_complex "\
-          [0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=25:5,eq=brightness=-0.25[bg]; \
-          [0:v]scale=900:900:force_original_aspect_ratio=decrease,pad=900:900:(ow-iw)/2:(oh-ih)/2:color=black@0.0,zoompan=z='min(zoom+0.0012,1.15)':d=360:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=900x900[fg]; \
-          [bg][fg]overlay=(W-w)/2:(H-h)/2-60,\
-          drawbox=x=0:y=0:w=1080:h=160:color=black@0.75:t=fill,\
-          drawtext=fontfile=$FONT:text='KMS CART  |  SMART DEALS':fontcolor=white:fontsize=46:x=(w-text_w)/2:y=58,\
-          drawbox=x=0:y=1520:w=1080:h=400:color=black@0.8:t=fill,\
-          drawtext=fontfile=$FONT:text='$TITLE':fontcolor=yellow:fontsize=42:x=(w-text_w)/2:y=1575,\
-          drawtext=fontfile=$FONT:text='FREE DELIVERY  |  COD AVAILABLE':fontcolor=white:fontsize=34:x=(w-text_w)/2:y=1660,\
-          drawtext=fontfile=$FONT:text='Shop Now at www.kmscart.com':fontcolor=#38bdf8:fontsize=38:x=(w-text_w)/2:y=1745[v]" \
-          -map "[v]" -map 1:a -t 12 -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest ad_video.mp4
+          cat << 'EOF' > build_assets.py
+          import os, re, html, asyncio, wave, math, struct
+          import edge_tts
 
-      - name: Upload Video to Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ad-${{ github.run_id }}
-          files: ad_video.mp4
+          title = os.environ.get("TITLE", "Smart Deal").strip()
+          caption = os.environ.get("CAPTION", "").strip()
+          run_num = int(os.environ.get("GITHUB_RUN_NUMBER", "1"))
 
-      - name: Notify Make.com Webhook
-        if: env.HOOK != ''
-        run: |
-          VIDEO_URL="https://github.com/${{ github.repository }}/releases/download/ad-${{ github.run_id }}/ad_video.mp4"
-          jq -n --arg v "$VIDEO_URL" --arg t "$TITLE" --arg c "$CAPTION" '{video_url:$v, title:$t, caption:$c}' > payload.json
-          curl -s -X POST -H "Content-Type: application/json" -d @payload.json "$HOOK"
+          clean_cap = re.sub(r'[*#_`]', '', caption)
+          lines = [l.strip() for l in re.split(r'[.!?\n]+', clean_cap) if len(l.strip()) > 6]
+          hook_text = lines[0][:85] if lines else "Trending Smart Find for Your Home!"
+
+          has_ml = bool(re.search(r'[\u0D00-\u0D7F]', hook_text))
+          has_hi = bool(re.search(r'[\u0900-\u097F]', hook_text))
+
+          if has_ml:
+              voice = "ml-IN-SobhanaNeural"
+              spoken = f"{hook_text}. ഇപ്പോൾ തന്നെ ഓർഡർ ചെയ്യൂ. ക്യാഷ് ഓൺ ഡെലിവറിയും ഫ്രീ ഡെലിവറിയും ലഭ്യമാണ്. kmscart dot com."
+          elif has_hi:
+              voice = "hi-IN-SwaraNeural"
+              spoken = f"{hook_text}. {title}. अभी ऑर्डर करें, कैश ऑन डिलीवरी और फ्री डिलीवरी उपलब्ध है. kmscart dot com."
+          else:
+              voice = "en-IN-NeerjaExpressiveNeural"
+              spoken = f"{hook_text}. {title}. Cash on delivery and free Pan-India delivery available at kmscart dot com!"
+
+          async def make_tts():
+              communicate = edge_tts.Communicate(spoken, voice, rate="+5%")
