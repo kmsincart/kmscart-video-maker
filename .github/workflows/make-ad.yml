@@ -51,17 +51,18 @@ jobs:
           parts = [re.sub(r'^(Malayalam|Hindi|English)\s*[:\-–]\s*', '', l.strip(), flags=re.I) for l in re.split(r'[\n.!?]+', clean)]
           ml_lines = [l for l in parts if len(l) > 6 and re.search(r'[\u0D00-\u0D7F]', l)]
           hi_lines = [l for l in parts if len(l) > 6 and re.search(r'[\u0900-\u097F]', l)]
-          ml_hook = ml_lines[0][:130] if ml_lines else f"{title}, മികച്ച ക്വാളിറ്റിയും വിലക്കുറവും!"
+          raw_ml = ml_lines[0][:130] if ml_lines else "മികച്ച ക്വാളിറ്റിയും കുറഞ്ഞ വിലയും"
+          ml_hook = re.sub(r'[A-Za-z]+', '', raw_ml).strip() or "മികച്ച ക്വാളിറ്റിയും കുറഞ്ഞ വിലയും"
           hi_sub = hi_lines[0][:85] if hi_lines else "भारत में ट्रेंडिंग डील — अभी ऑर्डर करें!"
-          spoken = f"{ml_hook}. ഇപ്പോൾ തന്നെ kmscart dot com-ൽ ഓർഡർ ചെയ്യൂ! ക്യാഷ് ഓൺ ഡെലിവറിയും ഫ്രീ ഡെലിവറിയും ലഭ്യമാണ്."
+          spoken = f"{ml_hook}. കെ എം എസ് കാർട്ട് ഡോട്ട് കോമിൽ ഇപ്പോൾ തന്നെ ഓർഡർ ചെയ്യൂ. ക്യാഷ് ഓൺ ഡെലിവറിയും ഫ്രീ ഡെലിവറിയും ലഭ്യമാണ്."
 
           tts_ok = False
           if tts_key:
-              for gvoice in (["ml-IN-Chirp3-HD-Achernar", "ml-IN-Wavenet-C"] if run_num % 2 == 0 else ["ml-IN-Wavenet-D", "ml-IN-Chirp3-HD-Achernar"]):
+              for gvoice in (["ml-IN-Wavenet-C"] if run_num % 2 == 0 else ["ml-IN-Wavenet-D"]):
                   try:
                       req = urllib.request.Request(
                           f"https://texttospeech.googleapis.com/v1/text:synthesize?key={tts_key}",
-                          data=json.dumps({"input":{"text":spoken},"voice":{"languageCode":"ml-IN","name":gvoice},"audioConfig":{"audioEncoding":"MP3","speakingRate":1.02}}).encode(),
+                          data=json.dumps({"input":{"text":spoken},"voice":{"languageCode":"ml-IN","name":gvoice},"audioConfig":{"audioEncoding":"MP3","speakingRate":0.98}}).encode(),
                           headers={"Content-Type":"application/json"}
                       )
                       res = json.loads(urllib.request.urlopen(req, timeout=20).read().decode())
@@ -70,7 +71,7 @@ jobs:
                           tts_ok = True; print("Used Google TTS:", gvoice); break
                   except Exception as e: print("Google TTS fallback:", gvoice, e)
           if not tts_ok:
-              try: asyncio.run(edge_tts.Communicate(spoken, "ml-IN-SobhanaNeural", rate="+4%").save("voice.mp3"))
+              try: asyncio.run(edge_tts.Communicate(spoken, "ml-IN-SobhanaNeural", rate="+2%").save("voice.mp3"))
               except Exception as e: print("Edge TTS:", e)
 
           dur = 12.0
