@@ -1,52 +1,40 @@
-import os, re, html, json, base64, asyncio, subprocess, urllib.request, urllib.parse
+"""KMS CART ad maker v3 - motion-graphics video (no voice) + premium poster.
+Runs in GitHub Actions. Inputs via env: IMG, TITLE, PRICE, MRP, GITHUB_RUN_NUMBER."""
+import os, re, json, html, wave, asyncio, subprocess, urllib.request, urllib.parse
 from pathlib import Path
+import numpy as np
+from playwright.async_api import async_playwright
 
-try:
-    import edge_tts
-except Exception:
-    edge_tts = None
-try:
-    from midiutil import MIDIFile
-except Exception:
-    MIDIFile = None
-
-UA = {"User-Agent": "Mozilla/5.0 (KMS CART video maker)"}
+UA = {"User-Agent": "Mozilla/5.0 (KMS CART ad maker)"}
 STORE = "https://kmscart.com"
+FPS, DUR = 30, 12
+CHROME = os.environ.get("CHROME", "/usr/bin/google-chrome")
 
 
-def get(url, timeout=20):
-    return urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=timeout).read()
+def get(url, t=25):
+    return urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=t).read()
 
 
-def jget(url, timeout=20):
-    return json.loads(get(url, timeout).decode())
-
-
-title = os.environ.get("TITLE", "Smart Deal").strip()[:80]
-caption = os.environ.get("CAPTION", "").strip()
+title = re.sub(r"\s+", " ", os.environ.get("TITLE", "Smart Deal")).strip()[:90]
 img_url = os.environ.get("IMG", "").strip()
-tts_key = os.environ.get("TTS_KEY", "").strip()
-pix_key = os.environ.get("PIX_KEY", "").strip()
-run_num = int(os.environ.get("GITHUB_RUN_NUMBER", "1") or 1)
-tl = title.lower()
+run = int(os.environ.get("GITHUB_RUN_NUMBER", "1") or 1)
 
-# ---------- 1. Product data from the live store (price, MRP, extra photos) ----------
+# ---------- product data from the live store ----------
 price = compare = None
 images = []
 try:
     q = urllib.parse.quote(title[:60])
-    s = jget(f"{STORE}/search/suggest.json?q={q}&resources[type]=product&resources[limit]=1")
-    prods = s.get("resources", {}).get("results", {}).get("products", [])
-    if prods:
-        p = prods[0]
+    s = json.loads(get(f"{STORE}/search/suggest.json?q={q}&resources[type]=product&resources[limit]=1"))
+    ps = s.get("resources", {}).get("results", {}).get("products", [])
+    if ps:
+        p = ps[0]
         price = float(p.get("price") or 0) or None
         compare = float(p.get("compare_at_price_max") or 0) or None
-        handle = p.get("handle")
-        if handle:
-            full = jget(f"{STORE}/products/{handle}.json").get("product", {})
-            images = [i.get("src") for i in full.get("images", []) if i.get("src")]
+        if p.get("handle"):
+            full = json.loads(get(f"{STORE}/products/{p['handle']}.json")).get("product", {})
+            images = [i["src"] for i in full.get("images", []) if i.get("src")]
 except Exception as e:
-    print("Store lookup skipped:", e)
+    print("store lookup skipped:", e)
 try:
     price = price or float(os.environ.get("PRICE") or 0) or None
     compare = compare or float(os.environ.get("MRP") or 0) or None
@@ -54,210 +42,233 @@ except ValueError:
     pass
 if img_url and img_url not in images:
     images.insert(0, img_url)
-images = images[:4] or ([img_url] if img_url else [])
-
 photos = []
-for n, u in enumerate(images):
+for n, u in enumerate(images[:3]):
     try:
-        Path(f"p{n}.jpg").write_bytes(get(u, 30))
-        photos.append(f"p{n}.jpg")
+        if u.startswith("file://"):
+            Path(f"p{n}.jpg").write_bytes(Path(u[7:]).read_bytes())
+        else:
+            sep = "&" if "?" in u else "?"
+            Path(f"p{n}.jpg").write_bytes(get(u + (sep + "width=900" if "cdn.shopify" in u else "")))
+        photos.append(Path(f"p{n}.jpg").resolve().as_uri())
     except Exception as e:
-        print("Image skipped:", e)
+        print("image skipped:", e)
 if not photos:
-    raise SystemExit("No product image could be downloaded")
+    raise SystemExit("no product image")
+disc = int(round((compare - price) * 100 / compare)) if price and compare and compare > price else None
 
-def rupee(v):
-    return "₹" + (f"{v:,.0f}" if v else "")
+# ---------- copy (safe, no invented claims) ----------
+tl = title.lower()
+hooks = {
+    "drink": [("SIP", "IN STYLE"), ("STAY", "HYDRATED"), ("YOUR NEW", "FAVOURITE")],
+    "kitchen": [("COOK", "SMARTER"), ("KITCHEN", "UPGRADE"), ("NO MORE", "MESS")],
+    "car": [("DRIVE", "IN STYLE"), ("CAR", "UPGRADE"), ("ROAD", "READY")],
+    "clean": [("CLEAN", "IN SECONDS"), ("SPARKLE", "MODE ON"), ("NO MORE", "SCRUBBING")],
+    "kids": [("PLAY.", "LEARN. GROW."), ("KIDS", "LOVE IT"), ("SMART", "PLAYTIME")],
+    "pet": [("HAPPY", "PETS"), ("PET", "PARENTS ❤"), ("FUR", "FREE HOME")],
+    "fit": [("GET", "STRONGER"), ("NO GYM?", "NO PROBLEM"), ("DAILY", "FIT")],
+    "home": [("SMART", "FIND"), ("HOME", "UPGRADE"), ("DEAL", "OF THE DAY")],
+}
+cat = "home"
+for k, words in {"drink": ["tumbler", "mug", "bottle", "jug", "sipper", "flask"],
+                 "kitchen": ["kitchen", "chopper", "container", "opener", "chopstick", "dish"],
+                 "car": ["car", "bike", "windshield", "dashboard", "helmet"],
+                 "clean": ["clean", "descaler", "remover", "mop", "grout", "stain", "rust", "washing"],
+                 "kids": ["kid", "baby", "puzzle", "copybook", "toy", "piggy", "spinner"],
+                 "pet": ["pet", "dog", "cat"],
+                 "fit": ["exerciser", "resistance", "grip", "gyro", "fitness"]}.items():
+    if any(w in tl for w in words):
+        cat = k
+        break
+h1, h2 = hooks[cat][run % 3]
+parts = [x.strip(" -–|,") for x in re.split(r"\s[–|-]\s|\swith\s|\s\|\s|,", title) if x.strip(" -–|,")]
+name = parts[0][:42]
+chips = [x[:30] for x in parts[1:3]] + ["💵 Cash on Delivery", "🚚 Pan-India Delivery", "✅ Quality Checked"]
+chips = chips[:3]
+themes = [  # bg1, bg2, accent, accent2
+    ("#3b1d8f", "#0b0f1f", "#ffd34d", "#ff8a00"),
+    ("#8f1d3b", "#14070b", "#ffe08a", "#ff4d6d"),
+    ("#0e5e6f", "#04141a", "#7cf7c8", "#22c55e"),
+]
+b1, b2, ac, ac2 = themes[run % 3]
+rupee = lambda v: "₹" + f"{v:,.0f}" if v else ""
+E = html.escape
 
-disc = None
-if price and compare and compare > price:
-    disc = int(round((compare - price) * 100 / compare))
-
-# ---------- 2. Language rotation: English -> Hindi -> Malayalam ----------
-clean = re.sub(r"[*#_`]", "", caption)
-parts = [re.sub(r"^(Malayalam|Hindi|English)\s*[:\-–]\s*", "", l.strip(), flags=re.I)
-         for l in re.split(r"[\n.!?]+", clean)]
-def first(pattern, exclude=None, default=""):
-    for l in parts:
-        if len(l) > 6 and re.search(pattern, l) and not (exclude and re.search(exclude, l)):
-            return l[:95]
-    return default
-
-lang_cycle = ["en", "hi", "ml"]
-LANG = lang_cycle[run_num % 3]
-price_en = f" Just {rupee(price)} only." if price else ""
-price_hi = f" सिर्फ़ {rupee(price)} में।" if price else ""
-price_ml = f" വെറും {rupee(price)} മാത്രം." if price else ""
-if LANG == "hi":
-    line = first(r"[ऀ-ॿ]", default="भारत में ट्रेंडिंग स्मार्ट डील")
-    spoken = f"{line}.{price_hi} अभी ऑर्डर करें kmscart dot com पर! कैश ऑन डिलीवरी उपलब्ध है।"
-    sub = line
-    gvoice, evoice, glang, font = "hi-IN-Wavenet-A", "hi-IN-SwaraNeural", "hi-IN", "Noto Sans Devanagari"
-elif LANG == "ml":
-    line = first(r"[ഀ-ൿ]", default=f"{title} ഇപ്പോൾ KMS CART-ൽ")
-    spoken = f"{line}.{price_ml} ഇപ്പോൾ തന്നെ kmscart dot com-ൽ ഓർഡർ ചെയ്യൂ! ക്യാഷ് ഓൺ ഡെലിവറി ലഭ്യമാണ്."
-    sub = line
-    gvoice, evoice, glang, font = "ml-IN-Wavenet-A", "ml-IN-SobhanaNeural", "ml-IN", "Noto Sans Malayalam"
-else:
-    line = first(r"[A-Za-z]", exclude=r"[ഀ-ൿऀ-ॿ]", default=f"Upgrade your everyday with {title}")
-    spoken = f"{line}.{price_en} Order now at kmscart dot com! Cash on Delivery available."
-    sub = line
-    gvoice, evoice, glang, font = "en-IN-Wavenet-D", "en-IN-NeerjaExpressiveNeural", "en-IN", "Noto Sans"
-
-# ---------- 3. Voice (Google TTS key if present, else free Edge TTS) ----------
-tts_ok = False
-if tts_key:
-    try:
-        body = json.dumps({"input": {"text": spoken}, "voice": {"languageCode": glang, "name": gvoice},
-                           "audioConfig": {"audioEncoding": "MP3", "speakingRate": 1.03}}).encode()
-        req = urllib.request.Request(f"https://texttospeech.googleapis.com/v1/text:synthesize?key={tts_key}",
-                                     data=body, headers={"Content-Type": "application/json"})
-        res = json.loads(urllib.request.urlopen(req, timeout=25).read().decode())
-        if "audioContent" in res:
-            Path("voice.mp3").write_bytes(base64.b64decode(res["audioContent"]))
-            tts_ok = True
-    except Exception as e:
-        print("Google TTS fallback:", e)
-if not tts_ok and edge_tts:
-    try:
-        asyncio.run(edge_tts.Communicate(spoken, evoice, rate="+4%").save("voice.mp3"))
-        tts_ok = True
-    except Exception as e:
-        print("Edge TTS failed:", e)
-
-dur = 14.0
-if tts_ok and Path("voice.mp3").exists():
-    out = subprocess.check_output(["ffprobe", "-v", "error", "-show_entries", "format=duration",
-                                   "-of", "default=noprint_wrappers=1:nokey=1", "voice.mp3"]).decode().strip()
-    dur = max(10.0, min(20.0, float(out) + 1.5))
-else:
-    subprocess.run(["ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo", "-t", "1", "voice.mp3"], check=True)
-
-# ---------- 4. Background music (generated, royalty free) ----------
-if MIDIFile:
-    m = MIDIFile(2)
-    m.addTempo(0, 0, 104); m.addProgramChange(0, 0, 0, 12)
-    m.addTempo(1, 0, 104); m.addProgramChange(1, 1, 0, 89)
-    chords = [[60, 64, 67, 71], [57, 60, 64, 67], [53, 57, 60, 64], [55, 59, 62, 67]]
-    for bar in range(12):
-        c = chords[bar % 4]
-        for n in c: m.addNote(1, 1, n, bar * 4, 4, 55)
-        for st, n in enumerate(c * 2): m.addNote(0, 0, n + 12, bar * 4 + st * 0.5, 0.45, 85)
-    with open("bgm.mid", "wb") as f: m.writeFile(f)
-
-# ---------- 5. Pixabay real-life b-roll (optional) ----------
-q = "modern home lifestyle"
-if any(w in tl for w in ["car", "bike", "tyre", "windshield", "vacuum"]): q = "car driving clean"
-elif any(w in tl for w in ["kitchen", "jug", "tumbler", "chopper", "bottle", "mug", "cleaner", "dish"]): q = "modern kitchen cooking"
-elif any(w in tl for w in ["baby", "kid", "toy", "toothbrush", "puzzle"]): q = "happy family kids home"
-elif any(w in tl for w in ["pet", "dog", "cat"]): q = "cute dog cat home"
-elif any(w in tl for w in ["makeup", "lipstick", "cosmetic", "shoe", "watch", "bag"]): q = "fashion lifestyle beauty"
-if pix_key:
-    try:
-        d = jget(f"https://pixabay.com/api/videos/?key={pix_key}&q={urllib.parse.quote(q)}&per_page=10&safesearch=true", 15)
-        hits = d.get("hits", [])
-        if hits:
-            v = hits[run_num % len(hits)].get("videos", {})
-            vurl = (v.get("medium") or v.get("small") or {}).get("url")
-            if vurl: Path("bg_video.mp4").write_bytes(get(vurl, 60))
-    except Exception as e:
-        print("Pixabay skipped:", e)
-
-# ---------- 6. Karaoke subtitles in the SAME language as the voice ----------
-words = sub.split()
-per_w = max(25, int(((dur - 1.8) * 100) / max(1, len(words))))
-k_line = "".join(f"{{\\k{per_w}}}{w} " for w in words)
-Path("subs.ass").write_text(f"""[Script Info]
-PlayResX: 1080
-PlayResY: 1920
-[V4+ Styles]
-Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,{font},54,&H0000E5FF,&H00FFFFFF,&H00000000,&HB0000000,-1,0,0,0,100,100,0,0,3,4,0,2,60,60,600,1
-[Events]
-Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
-Dialogue: 0,0:00:00.20,0:00:{dur-0.3:05.2f},Default,,0,0,0,,{k_line}
-""", encoding="utf-8")
-
-# ---------- 7. Overlay (video) + premium poster (feed image) ----------
-themes = [("#0f172a", "#1e293b", "#f59e0b", "#111827", "🔥 TRENDING IN INDIA"),
-          ("#7f1d1d", "#dc2626", "#fde047", "#111827", "⚡ DEAL OF THE DAY"),
-          ("#0b1324", "#1d4ed8", "#38bdf8", "#082f49", "✨ BESTSELLER PICK")]
-b1, b2, ac, at, tg = themes[run_num % 3]
-t = html.escape(title)
-price_html = ""
-if price:
-    price_html = f'<span class="pr">{rupee(price)}</span>'
-    if disc: price_html += f'<span class="mrp">{rupee(compare)}</span><span class="off">{disc}% OFF</span>'
-
-css_common = "*{box-sizing:border-box;margin:0;padding:0}body{font-family:'Noto Sans','Poppins','DejaVu Sans',sans-serif,'Noto Color Emoji'}"
-Path("overlay.html").write_text(f"""<!DOCTYPE html><html><head><meta charset="utf-8"><style>{css_common}
-body{{width:1080px;height:1920px;background:transparent;display:flex;flex-direction:column;justify-content:space-between;padding:56px 48px}}
-.top{{display:flex;justify-content:space-between;align-items:center;background:rgba(15,23,42,.82);padding:20px 34px;border-radius:28px;border:2px solid rgba(255,255,255,.18)}}
-.logo{{color:#fff;font-size:34px;font-weight:900;letter-spacing:2px}}.tag{{background:{ac};color:{at};font-size:26px;font-weight:900;padding:10px 26px;border-radius:999px}}
-.card{{width:100%;background:linear-gradient(135deg,{b1},{b2});color:#fff;padding:32px 36px;border-radius:32px;text-align:center;border:2px solid rgba(255,255,255,.22);display:flex;flex-direction:column;gap:16px;align-items:center}}
-.ti{{font-size:38px;font-weight:800}}.prw{{display:flex;gap:18px;align-items:center}}.pr{{font-size:58px;font-weight:900;color:{ac}}}.mrp{{font-size:32px;text-decoration:line-through;opacity:.7}}.off{{background:#16a34a;font-size:28px;font-weight:900;padding:6px 18px;border-radius:12px}}
-.bs{{display:flex;gap:16px;flex-wrap:wrap;justify-content:center}}.bg{{background:rgba(255,255,255,.14);padding:10px 22px;border-radius:14px;font-size:26px;font-weight:700}}
-.ct{{background:{ac};color:{at};font-size:34px;font-weight:900;padding:16px 44px;border-radius:999px}}</style></head><body>
-<div class="top"><div class="logo">KMS CART</div><div class="tag">{tg}</div></div>
-<div class="card"><div class="ti">{t}</div><div class="prw">{price_html}</div>
-<div class="bs"><div class="bg">💵 Cash on Delivery</div><div class="bg">🚚 Free Pan-India Delivery</div></div>
-<div class="ct">🛒 Order Now: www.kmscart.com</div></div></body></html>""", encoding="utf-8")
-
-prod_src = Path(photos[0]).resolve().as_uri()
-Path("poster.html").write_text(f"""<!DOCTYPE html><html><head><meta charset="utf-8"><style>{css_common}
-body{{width:1080px;height:1350px;overflow:hidden;background:radial-gradient(circle at 70% 25%,{b2} 0%,{b1} 60%,#020617 100%);color:#fff;position:relative}}
-.glow{{position:absolute;width:760px;height:760px;border-radius:50%;background:radial-gradient(circle,rgba(255,255,255,.22),transparent 65%);left:160px;top:170px}}
-.hdr{{position:absolute;top:44px;left:48px;right:48px;display:flex;justify-content:space-between;align-items:center}}
-.logo{{font-size:40px;font-weight:900;letter-spacing:3px}}.logo b{{color:{ac}}}
-.tag{{background:{ac};color:{at};font-size:26px;font-weight:900;padding:12px 26px;border-radius:999px}}
-.ph{{position:absolute;left:150px;top:150px;width:780px;height:640px;background:#fff;border-radius:44px;box-shadow:0 40px 90px rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;overflow:hidden}}
-.ph img{{max-width:92%;max-height:92%;object-fit:contain}}
-.disc{{position:absolute;right:110px;top:120px;width:190px;height:190px;border-radius:50%;background:#16a34a;color:#fff;display:flex;flex-direction:column;align-items:center;justify-content:center;font-weight:900;font-size:56px;line-height:1;box-shadow:0 12px 30px rgba(0,0,0,.4);border:6px solid #fff;transform:rotate(-10deg)}}
-.disc small{{font-size:28px}}
-.ti{{position:absolute;left:60px;right:60px;top:820px;text-align:center;font-size:52px;font-weight:900;line-height:1.15}}
-.prw{{position:absolute;left:0;right:0;top:960px;display:flex;justify-content:center;align-items:baseline;gap:22px}}
-.pr{{font-size:92px;font-weight:900;color:{ac}}}.mrp{{font-size:44px;text-decoration:line-through;opacity:.7}}.off{{display:none}}
-.bs{{position:absolute;left:0;right:0;top:1100px;display:flex;justify-content:center;gap:18px}}
-.bg{{background:rgba(255,255,255,.14);border:2px solid rgba(255,255,255,.25);padding:12px 24px;border-radius:16px;font-size:28px;font-weight:700}}
-.ft{{position:absolute;left:0;right:0;bottom:0;height:120px;background:{ac};color:{at};display:flex;align-items:center;justify-content:center;font-size:44px;font-weight:900;letter-spacing:1px}}
-</style></head><body><div class="glow"></div>
-<div class="hdr"><div class="logo">KMS <b>CART</b></div><div class="tag">{tg}</div></div>
-<div class="ph"><img src="{prod_src}"></div>
-{f'<div class="disc">{disc}%<small>OFF</small></div>' if disc else ''}
-<div class="ti">{t}</div><div class="prw">{price_html}</div>
-<div class="bs"><div class="bg">💵 Cash on Delivery</div><div class="bg">🚚 Free Delivery</div><div class="bg">✅ Easy Order</div></div>
-<div class="ft">🛒 Order now · www.kmscart.com</div></body></html>""", encoding="utf-8")
-
-Path("dur.txt").write_text(f"{dur:.1f}")
-Path("photos.txt").write_text("\n".join(photos))
-print("LANG", LANG, "price", price, "compare", compare, "photos", len(photos), "dur", dur)
-
-# ---------- 8. Product slideshow clip (all store photos, soft zoom + crossfade) ----------
-S = 920 if not Path("bg_video.mp4").exists() else 680
+# ---------- video HTML ----------
 n = len(photos)
-seg = max(2.5, dur / n + (0.6 if n > 1 else 0))
-frames = int(seg * 30)
-clips = []
-for i, ph in enumerate(photos):
-    out = f"c{i}.mp4"
-    subprocess.run(["ffmpeg", "-y", "-loop", "1", "-i", ph, "-vf",
-                    f"scale={S-40}:{S-40}:force_original_aspect_ratio=decrease:flags=lanczos,"
-                    f"pad={S}:{S}:(ow-iw)/2:(oh-ih)/2:color=white,"
-                    f"zoompan=z='min(zoom+0.0010,1.10)':d={frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s={S}x{S}:fps=30",
-                    "-t", f"{seg:.2f}", "-pix_fmt", "yuv420p", "-c:v", "libx264", "-preset", "veryfast", out],
-                   check=True, capture_output=True)
-    clips.append(out)
-if n == 1:
-    Path(clips[0]).rename("fg.mp4")
-else:
-    inputs, fc, prev, off = [], "", "[0:v]", 0.0
-    for c in clips: inputs += ["-i", c]
-    for i in range(1, n):
-        off += seg - 0.6
-        lab = f"[x{i}]" if i < n - 1 else "[out]"
-        fc += f"{prev}[{i}:v]xfade=transition=fade:duration=0.6:offset={off:.2f}{lab};"
-        prev = lab
-    subprocess.run(["ffmpeg", "-y", *inputs, "-filter_complex", fc.rstrip(";"), "-map", "[out]",
-                    "-pix_fmt", "yuv420p", "-c:v", "libx264", "-preset", "veryfast", "fg.mp4"], check=True, capture_output=True)
-Path("fgsize.txt").write_text(str(S))
-print("slideshow ready", n, "photos")
+imgs = "".join(f'<img class="ph ph{i}" src="{u}">' for i, u in enumerate(photos))
+ph_css = ""
+if n > 1:
+    seg = 30 / n  # photos rotate between 20% and 55% of the timeline
+    for i in range(n):
+        a, b = 20 + i * (35 / n), 20 + (i + 1) * (35 / n)
+        ph_css += f".ph{i}{{animation:ph{i} 12s forwards}}@keyframes ph{i}{{0%,{max(0,a-2):.1f}%{{opacity:{1 if i==0 else 0}}}{a:.1f}%{{opacity:1}}{b:.1f}%{{opacity:1}}{b+2:.1f}%{{opacity:{1 if i==n-1 else 0}}}100%{{opacity:{1 if i==0 else 0}}}}}"
+mrp_html = f'<div class="mrp">MRP {rupee(compare)}</div><div class="off">{disc}% OFF</div>' if disc else ""
+price_html = f'<div class="lbl">ONLY</div><div class="amt">{rupee(price)}</div>{mrp_html}' if price else '<div class="amt" style="font-size:150px">BEST PRICE</div>'
+video_html = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{width:1080px;height:1920px;overflow:hidden;font-family:Poppins,'Noto Sans','Noto Sans Malayalam',sans-serif;background:{b2};color:#fff;position:relative}}
+.bg{{position:absolute;inset:0;background:radial-gradient(circle at 50% 40%,{b1} 0%,{b2} 70%);animation:hue 12s linear forwards}}
+@keyframes hue{{0%{{filter:hue-rotate(0)}}50%{{filter:hue-rotate(25deg)}}100%{{filter:hue-rotate(-20deg)}}}}
+.ring{{position:absolute;left:50%;top:42%;border-radius:50%;border:3px solid rgba(255,255,255,.13);transform:translate(-50%,-50%) scale(0);animation:ring 12s ease-out forwards}}
+.r1{{width:760px;height:760px;animation-delay:2s}}.r2{{width:960px;height:960px;animation-delay:2.15s}}.r3{{width:1160px;height:1160px;animation-delay:2.3s}}
+@keyframes ring{{0%{{transform:translate(-50%,-50%) scale(0);opacity:0}}6%{{transform:translate(-50%,-50%) scale(1.05);opacity:1}}10%{{transform:translate(-50%,-50%) scale(1)}}100%{{transform:translate(-50%,-50%) scale(1.08);opacity:.6}}}}
+.pp i{{position:absolute;border-radius:50%;background:{ac};opacity:0;animation:fly 12s linear forwards}}
+@keyframes fly{{0%,16%{{opacity:0;transform:none}}20%{{opacity:.85}}100%{{opacity:0;transform:translateY(-900px)}}}}
+.logo{{position:absolute;top:70px;left:0;right:0;text-align:center;font-weight:800;font-size:46px;letter-spacing:6px;animation:fade 12s forwards}}
+.logo b{{color:{ac}}}@keyframes fade{{0%{{opacity:0;transform:translateY(-30px)}}4%{{opacity:1;transform:none}}100%{{opacity:1}}}}
+.hook{{position:absolute;top:640px;left:40px;right:40px;text-align:center;font-weight:900;line-height:1.05}}
+.hook span{{display:block;font-size:124px;opacity:0;animation:slam 12s forwards}}
+.hook span:nth-child(2){{color:{ac};animation-name:slam2}}
+@keyframes slam{{0%{{opacity:0;transform:scale(2.4)}}3%{{opacity:1;transform:scale(.95)}}4.5%{{transform:scale(1)}}14%{{opacity:1;transform:scale(1)}}17%{{opacity:0;transform:translateY(-200px) scale(.8)}}100%{{opacity:0}}}}
+@keyframes slam2{{0%,5%{{opacity:0;transform:scale(2.4)}}8%{{opacity:1;transform:scale(.95)}}9.5%{{transform:scale(1)}}14%{{opacity:1}}17%{{opacity:0;transform:translateY(-200px) scale(.8)}}100%{{opacity:0}}}}
+.prod{{position:absolute;left:50%;top:42%;width:720px;height:720px;transform:translate(-50%,-50%) translateY(1400px) rotate(-10deg);animation:prod 12s cubic-bezier(.2,.9,.2,1) forwards}}
+@keyframes prod{{0%,16%{{transform:translate(-50%,-50%) translateY(1400px) rotate(-10deg)}}24%{{transform:translate(-50%,-50%) translateY(-20px) rotate(2deg)}}27%{{transform:translate(-50%,-50%) rotate(0)}}55%{{transform:translate(-50%,-50%) scale(1)}}60%{{transform:translate(-50%,-62%) scale(.78)}}100%{{transform:translate(-50%,-64%) scale(.76)}}}}
+.glow{{position:absolute;inset:-140px;border-radius:50%;background:radial-gradient(circle,{ac}66,transparent 65%);animation:pulse 1s ease-in-out infinite alternate}}
+@keyframes pulse{{from{{transform:scale(.92)}}to{{transform:scale(1.06)}}}}
+.card{{position:absolute;inset:0;border-radius:56px;background:#fff;box-shadow:0 40px 100px rgba(0,0,0,.55);overflow:hidden}}
+.ph{{position:absolute;inset:30px;width:calc(100% - 60px);height:calc(100% - 60px);object-fit:contain;opacity:0}}.ph0{{opacity:1}}
+{ph_css}
+.name{{position:absolute;left:60px;right:60px;top:1180px;text-align:center;font-size:54px;font-weight:800;line-height:1.15;opacity:0;animation:nm 12s forwards}}
+@keyframes nm{{0%,25%{{opacity:0;transform:translateY(60px)}}29%{{opacity:1;transform:none}}54%{{opacity:1}}57%{{opacity:0}}100%{{opacity:0}}}}
+.chip{{position:absolute;left:50%;padding:20px 38px;border-radius:999px;background:rgba(255,255,255,.13);border:2px solid rgba(255,255,255,.35);font-size:40px;font-weight:700;white-space:nowrap;opacity:0}}
+.c0{{top:1340px;animation:ch0 12s forwards}}.c1{{top:1460px;animation:ch1 12s forwards}}.c2{{top:1580px;animation:ch2 12s forwards}}
+@keyframes ch0{{0%,30%{{opacity:0;transform:translateX(-80%) scale(.6)}}34%{{opacity:1;transform:translateX(-50%) scale(1.06)}}36%{{transform:translateX(-50%) scale(1)}}54%{{opacity:1;transform:translateX(-50%)}}57%{{opacity:0;transform:translateX(-50%)}}100%{{opacity:0}}}}
+@keyframes ch1{{0%,34%{{opacity:0;transform:translateX(-20%) scale(.6)}}38%{{opacity:1;transform:translateX(-50%) scale(1.06)}}40%{{transform:translateX(-50%) scale(1)}}54%{{opacity:1;transform:translateX(-50%)}}57%{{opacity:0;transform:translateX(-50%)}}100%{{opacity:0}}}}
+@keyframes ch2{{0%,38%{{opacity:0;transform:translateX(-80%) scale(.6)}}42%{{opacity:1;transform:translateX(-50%) scale(1.06)}}44%{{transform:translateX(-50%) scale(1)}}54%{{opacity:1;transform:translateX(-50%)}}57%{{opacity:0;transform:translateX(-50%)}}100%{{opacity:0}}}}
+.price{{position:absolute;left:0;right:0;top:1090px;text-align:center;opacity:0;animation:pr 12s forwards}}
+.price .lbl{{font-size:52px;font-weight:600;letter-spacing:4px;opacity:.85}}
+.price .amt{{font-size:220px;font-weight:900;color:{ac};line-height:1;text-shadow:0 0 60px {ac}99}}
+.price .mrp{{display:inline-block;font-size:48px;opacity:.75;text-decoration:line-through;margin-top:10px}}
+.price .off{{display:inline-block;margin-left:24px;background:#16a34a;padding:8px 26px;border-radius:14px;font-size:48px;font-weight:900;vertical-align:middle}}
+@keyframes pr{{0%,57%{{opacity:0;transform:scale(3)}}61%{{opacity:1;transform:scale(.9)}}63%{{transform:scale(1.05)}}65%{{transform:scale(1)}}100%{{opacity:1}}}}
+.badges{{position:absolute;left:0;right:0;top:1500px;display:flex;justify-content:center;gap:24px;opacity:0;animation:up 12s forwards}}
+.badges div{{background:#16a34a;padding:18px 30px;border-radius:18px;font-size:36px;font-weight:700}}.badges div:last-child{{background:#2563eb}}
+@keyframes up{{0%,66%{{opacity:0;transform:translateY(80px)}}70%{{opacity:1;transform:none}}100%{{opacity:1}}}}
+.cta{{position:absolute;left:80px;right:80px;bottom:120px;height:150px;border-radius:999px;background:linear-gradient(90deg,{ac},{ac2});color:#111;display:flex;align-items:center;justify-content:center;font-size:56px;font-weight:900;opacity:0;animation:cta 12s forwards;box-shadow:0 20px 60px {ac2}88;overflow:hidden}}
+@keyframes cta{{0%,74%{{opacity:0;transform:translateY(200px)}}78%{{opacity:1;transform:translateY(-10px)}}80%{{transform:none}}84%{{transform:scale(1.05)}}86%{{transform:scale(1)}}90%{{transform:scale(1.05)}}92%{{transform:scale(1)}}100%{{opacity:1}}}}
+.cta:after{{content:"";position:absolute;top:0;bottom:0;width:140px;left:-200px;background:linear-gradient(90deg,transparent,rgba(255,255,255,.8),transparent);transform:skewX(-20deg);animation:sh 12s forwards}}
+@keyframes sh{{0%,80%{{left:-200px}}88%{{left:110%}}100%{{left:110%}}}}
+.flash{{position:absolute;inset:0;background:#fff;opacity:0;animation:fl 12s forwards}}
+@keyframes fl{{0%,16%{{opacity:0}}16.5%{{opacity:.7}}19%{{opacity:0}}57%{{opacity:0}}57.5%{{opacity:.6}}60%{{opacity:0}}100%{{opacity:0}}}}
+</style></head><body>
+<div class="bg"></div><div class="ring r1"></div><div class="ring r2"></div><div class="ring r3"></div><div class="pp" id="pp"></div>
+<div class="logo">KMS <b>CART</b></div>
+<div class="hook"><span>{E(h1)}</span><span>{E(h2)}</span></div>
+<div class="prod"><div class="glow"></div><div class="card">{imgs}</div></div>
+<div class="name">{E(name)}</div>
+{''.join(f'<div class="chip c{i}">{E(c)}</div>' for i, c in enumerate(chips))}
+<div class="flash"></div>
+<div class="price">{price_html}</div>
+<div class="badges"><div>💵 Cash on Delivery</div><div>🚚 Pan-India</div></div>
+<div class="cta">🛒 ORDER NOW • kmscart.com</div>
+<script>let s={run * 7919 % 9973};const r=()=>(s=(s*16807)%2147483647)/2147483647;
+const pp=document.getElementById('pp');for(let i=0;i<26;i++){{const e=document.createElement('i');e.style.left=(r()*1040)+'px';e.style.top=(900+r()*900)+'px';e.style.animationDelay=(-r()*2)+'s';const z=4+r()*12;e.style.width=e.style.height=z+'px';pp.appendChild(e)}}</script>
+</body></html>"""
+Path("video.html").write_text(video_html, encoding="utf-8")
+
+# ---------- poster HTML (1080x1350 feed) ----------
+pmrp = f'<span class="mrp">{rupee(compare)}</span>' if disc else ""
+poff = f'<div class="disc">{disc}%<small>OFF</small></div>' if disc else ""
+poster_html = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{width:1080px;height:1350px;overflow:hidden;font-family:Poppins,'Noto Sans',sans-serif;color:#fff;background:radial-gradient(circle at 50% 38%,{b1} 0%,{b2} 72%);position:relative}}
+.ring{{position:absolute;left:50%;top:40%;border-radius:50%;border:3px solid rgba(255,255,255,.12);transform:translate(-50%,-50%)}}
+.glow{{position:absolute;left:50%;top:40%;width:900px;height:900px;transform:translate(-50%,-50%);border-radius:50%;background:radial-gradient(circle,{ac}55,transparent 62%)}}
+.top{{position:absolute;top:44px;left:56px;right:56px;display:flex;justify-content:space-between;align-items:center}}
+.logo{{font-size:42px;font-weight:800;letter-spacing:5px}}.logo b{{color:{ac}}}
+.tag{{background:{ac};color:#111;font-weight:800;font-size:28px;padding:12px 28px;border-radius:999px}}
+.hook{{position:absolute;top:130px;left:0;right:0;text-align:center;font-weight:900;font-size:64px;letter-spacing:1px}}.hook b{{color:{ac}}}
+.card{{position:absolute;left:50%;top:40%;width:640px;height:640px;transform:translate(-50%,-44%);background:#fff;border-radius:52px;box-shadow:0 40px 90px rgba(0,0,0,.5);overflow:hidden}}
+.card img{{position:absolute;inset:28px;width:calc(100% - 56px);height:calc(100% - 56px);object-fit:contain}}
+.disc{{position:absolute;right:120px;top:250px;width:200px;height:200px;border-radius:50%;background:#16a34a;border:7px solid #fff;display:flex;flex-direction:column;align-items:center;justify-content:center;font-weight:900;font-size:62px;line-height:1;transform:rotate(-10deg);box-shadow:0 14px 34px rgba(0,0,0,.45)}}.disc small{{font-size:30px}}
+.name{{position:absolute;left:60px;right:60px;top:905px;text-align:center;font-size:44px;font-weight:800;line-height:1.15}}
+.prow{{position:absolute;left:0;right:0;top:1000px;display:flex;justify-content:center;align-items:baseline;gap:22px}}
+.amt{{font-size:120px;font-weight:900;color:{ac};text-shadow:0 0 40px {ac}88}}.mrp{{font-size:46px;opacity:.7;text-decoration:line-through}}
+.chips{{position:absolute;left:0;right:0;top:1150px;display:flex;justify-content:center;gap:16px}}
+.chips div{{background:rgba(255,255,255,.13);border:2px solid rgba(255,255,255,.3);padding:12px 22px;border-radius:14px;font-size:27px;font-weight:700}}
+.cta{{position:absolute;left:0;right:0;bottom:0;height:104px;background:linear-gradient(90deg,{ac},{ac2});color:#111;display:flex;align-items:center;justify-content:center;font-size:42px;font-weight:900}}
+</style></head><body>
+<div class="glow"></div><div class="ring" style="width:820px;height:820px"></div><div class="ring" style="width:1040px;height:1040px"></div>
+<div class="top"><div class="logo">KMS <b>CART</b></div><div class="tag">{'🔥 TRENDING' if run % 2 else '⚡ DEAL OF THE DAY'}</div></div>
+<div class="hook">{E(h1)} <b>{E(h2)}</b></div>
+<div class="card"><img src="{photos[0]}"></div>{poff}
+<div class="name">{E(name)}</div>
+<div class="prow"><span class="amt">{rupee(price) if price else 'BEST PRICE'}</span>{pmrp}</div>
+<div class="chips"><div>💵 Cash on Delivery</div><div>🚚 Pan-India</div><div>💬 WhatsApp Order</div></div>
+<div class="cta">🛒 Order now · www.kmscart.com</div>
+</body></html>"""
+Path("poster.html").write_text(poster_html, encoding="utf-8")
+
+# ---------- music (synth, royalty free, varies per run) ----------
+sr = 44100
+t = np.arange(int(sr * DUR)) / sr
+out = np.zeros_like(t)
+rng = np.random.default_rng(run)
+
+
+def env(n, a=0.005, d=0.3):
+    x = np.arange(n) / sr
+    return np.minimum(1, x / a) * np.exp(-x / d)
+
+
+def add(sig, start):
+    i = int(start * sr); j = min(len(out), i + len(sig))
+    if i < len(out):
+        out[i:j] += sig[: j - i]
+
+
+beat = 0.5
+for k in range(int(DUR / beat)):
+    s = k * beat
+    if s < 1.9:
+        continue
+    n = int(0.35 * sr); x = np.arange(n) / sr
+    add(np.sin(2 * np.pi * (55 + 90 * np.exp(-x * 30)) * x) * env(n, 0.001, 0.12) * 0.9, s)
+    if k % 2:
+        add(rng.standard_normal(int(0.2 * sr)) * env(int(0.2 * sr), 0.001, 0.05) * 0.35, s)
+    for hh in (0, 0.25):
+        add(rng.standard_normal(int(0.05 * sr)) * env(int(0.05 * sr), 0.0005, 0.01) * 0.12, s + hh)
+progs = [[[220, 277.2, 329.6], [174.6, 220, 261.6], [196, 246.9, 293.7], [164.8, 207.7, 246.9]],
+         [[261.6, 329.6, 392], [220, 261.6, 329.6], [174.6, 220, 261.6], [196, 246.9, 293.7]],
+         [[293.7, 349.2, 440], [233.1, 293.7, 349.2], [261.6, 329.6, 392], [220, 277.2, 329.6]]]
+chords = progs[run % 3]
+for bar in range(6):
+    s = bar * 2.0; c = chords[bar % 4]; n = int(2 * sr); x = np.arange(n) / sr
+    add(sum(np.sin(2 * np.pi * f * x) + 0.3 * np.sin(4 * np.pi * f * x) for f in c) * 0.06 * np.minimum(1, x / 0.3), s)
+    if s >= 2:
+        add(np.sign(np.sin(np.pi * c[0] * x)) * 0.05 * env(n, 0.01, 0.6), s)
+n = int(1.9 * sr); x = np.arange(n) / sr
+add(rng.standard_normal(n) * (x / 1.9) ** 2 * 0.25 * np.sin(2 * np.pi * (200 + 600 * x) * x), 0)
+for s in (1.95, 6.9, 9.0):
+    n = int(1.2 * sr); x = np.arange(n) / sr
+    add((np.sin(2 * np.pi * 45 * x) + rng.standard_normal(n) * 0.3) * env(n, 0.001, 0.4) * 0.8, s)
+out *= np.minimum(1, (DUR - t) / 0.8)
+out /= np.max(np.abs(out)) * 1.1
+pcm = (out * 32767).astype(np.int16)
+w = wave.open("music.wav", "wb"); w.setnchannels(2); w.setsampwidth(2); w.setframerate(sr)
+w.writeframes(np.stack([pcm, pcm], 1).tobytes()); w.close()
+
+
+# ---------- render ----------
+async def render():
+    os.makedirs("frames", exist_ok=True)
+    async with async_playwright() as p:
+        b = await p.chromium.launch(executable_path=CHROME, args=["--no-sandbox", "--allow-file-access-from-files"])
+        pg = await b.new_page(viewport={"width": 1080, "height": 1350})
+        await pg.goto(Path("poster.html").resolve().as_uri()); await pg.wait_for_timeout(800)
+        await pg.screenshot(path="poster.jpg", type="jpeg", quality=92)
+        await pg.set_viewport_size({"width": 1080, "height": 1920})
+        await pg.goto(Path("video.html").resolve().as_uri()); await pg.wait_for_timeout(800)
+        await pg.evaluate("document.getAnimations().forEach(a=>a.pause())")
+        for i in range(FPS * DUR):
+            await pg.evaluate(f"document.getAnimations().forEach(a=>a.currentTime={i * 1000 / FPS})")
+            await pg.screenshot(path=f"frames/{i:04d}.jpg", type="jpeg", quality=90)
+        await b.close()
+
+
+asyncio.run(render())
+subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-framerate", str(FPS), "-i", "frames/%04d.jpg", "-i", "music.wav",
+                "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
+                "-shortest", "-movflags", "+faststart", "ad_video.mp4"], check=True)
+print("done:", title, "| price", price, "mrp", compare, "| photos", len(photos), "| theme", run % 3)
