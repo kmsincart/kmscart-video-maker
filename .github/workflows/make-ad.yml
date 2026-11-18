@@ -21,43 +21,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install open-source video, voice, music and font tools
+      - name: Install tools and fonts (all free / open source)
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg fonts-noto-core fonts-noto-color-emoji fluidsynth fluid-soundfont-gm
-          pip install -q edge-tts midiutil
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg fonts-noto-core fonts-noto-color-emoji
+          mkdir -p ~/.fonts
+          for f in Poppins-Bold Poppins-ExtraBold Poppins-Black Poppins-SemiBold; do
+            curl -sSL -o ~/.fonts/$f.ttf "https://github.com/google/fonts/raw/main/ofl/poppins/$f.ttf" || true
+          done
+          fc-cache -f >/dev/null
+          pip install -q playwright numpy
 
-      # Inputs are passed through env vars (never pasted into the script) so a
-      # product title or caption can never break or inject into the shell.
-      - name: Build voice, music, poster and slideshow
+      # Inputs go through env vars (never pasted into the script) so a product
+      # title or caption can never break or inject into the shell.
+      - name: Build motion video + poster
         env:
           IMG: ${{ github.event.inputs.image_url || github.event.client_payload.image_url }}
           TITLE: ${{ github.event.inputs.title || github.event.client_payload.title }}
-          CAPTION: ${{ github.event.inputs.caption || github.event.client_payload.caption }}
           PRICE: ${{ github.event.inputs.price || github.event.client_payload.price }}
           MRP: ${{ github.event.inputs.mrp || github.event.client_payload.mrp }}
-          TTS_KEY: ${{ secrets.GOOGLE_TTS_KEY }}
-          PIX_KEY: ${{ secrets.PIXABAY_API_KEY }}
+          CHROME: /usr/bin/google-chrome
         run: python3 build.py
-
-      - name: Render poster and video
-        run: |
-          VDUR=$(cat dur.txt); S=$(cat fgsize.txt)
-          SF2=$(find /usr/share/sounds/sf2 -name "*.sf2" | head -n 1)
-          if [ -f bgm.mid ]; then fluidsynth -ni "$SF2" bgm.mid -F bgm.wav -r 44100 >/dev/null 2>&1; fi
-          [ -f bgm.wav ] || ffmpeg -y -f lavfi -i anullsrc=r=44100:cl=stereo -t 25 bgm.wav
-          google-chrome --headless --no-sandbox --disable-gpu --allow-file-access-from-files --screenshot=poster.png --window-size=1080,1350 poster.html
-          google-chrome --headless --no-sandbox --disable-gpu --screenshot=overlay.png --window-size=1080,1920 --default-background-color=00000000 overlay.html
-          ffmpeg -y -i poster.png -q:v 2 poster.jpg
-          AUD="[2:a]apad,loudnorm=I=-16:TP=-1.5:LRA=11,asplit=2[vo1][vo2];[3:a]volume=0.22[mu];[mu][vo1]sidechaincompress=threshold=0.02:ratio=6:attack=20:release=250[duck];[vo2][duck]amix=inputs=2:duration=first[a]"
-          if [ -f bg_video.mp4 ]; then
-            ffmpeg -y -stream_loop -1 -i bg_video.mp4 -stream_loop -1 -i fg.mp4 -i voice.mp3 -i bgm.wav -i overlay.png -filter_complex \
-              "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,eq=brightness=-0.12[bg];[bg][1:v]overlay=(W-w)/2:250[base];[base][4:v]overlay=0:0,ass=subs.ass[v];$AUD" \
-              -map "[v]" -map "[a]" -t "$VDUR" -r 30 -c:v libx264 -preset medium -crf 20 -pix_fmt yuv420p -c:a aac -b:a 160k -movflags +faststart ad_video.mp4
-          else
-            ffmpeg -y -loop 1 -i p0.jpg -stream_loop -1 -i fg.mp4 -i voice.mp3 -i bgm.wav -i overlay.png -filter_complex \
-              "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=35:6,eq=brightness=-0.25[bg];[bg][1:v]overlay=(W-w)/2:240[base];[base][4:v]overlay=0:0,ass=subs.ass[v];$AUD" \
-              -map "[v]" -map "[a]" -t "$VDUR" -r 30 -c:v libx264 -preset medium -crf 20 -pix_fmt yuv420p -c:a aac -b:a 160k -movflags +faststart ad_video.mp4
-          fi
 
       - name: Upload video and poster to release
         uses: softprops/action-gh-release@v2
